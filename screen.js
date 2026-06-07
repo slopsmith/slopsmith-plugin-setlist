@@ -4,6 +4,80 @@ let _slCurrentId = null;
 let _slQueue = [];  // for sequential playback
 let _slQueueIndex = -1;
 
+// In-app text prompt — window.prompt() is not implemented in the Electron
+// desktop app (it returns null), so the prompt()-based create/rename flows were
+// silent no-ops there. Returns the entered string, or null on Esc/Cancel/
+// backdrop; Enter submits. Self-contained (no host dependency) and prefixed to
+// avoid colliding with other plugins'/the host's globals. Injection-safe:
+// caller text is set via textContent/value, never innerHTML.
+function slUiPrompt({ title = '', label = '', value = '', okLabel = 'OK', placeholder = '' } = {}) {
+    return new Promise((resolve) => {
+        const modal = document.createElement('div');
+        modal.className = 'slopsmith-modal fixed inset-0 z-[200] flex items-center justify-center bg-black/70 backdrop-blur-sm';
+        modal.setAttribute('role', 'dialog');
+        modal.setAttribute('aria-modal', 'true');
+        if (title) modal.setAttribute('aria-label', title);
+        modal.innerHTML = `
+            <form class="bg-dark-700 border border-gray-700 rounded-2xl p-6 w-full max-w-sm mx-4 shadow-2xl">
+                <h3 class="text-lg font-bold text-white mb-4" data-sl-prompt-title hidden></h3>
+                <label class="text-xs text-gray-400 mb-1 block" data-sl-prompt-label hidden></label>
+                <input type="text" data-sl-prompt-input autocomplete="off"
+                    class="w-full bg-dark-600 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 outline-none focus:border-accent/50">
+                <div class="flex gap-3 mt-5">
+                    <button type="submit"
+                        class="flex-1 bg-accent hover:bg-accent-light px-4 py-2 rounded-xl text-sm font-semibold text-white transition" data-sl-prompt-ok></button>
+                    <button type="button" data-sl-prompt-cancel
+                        class="px-4 py-2 bg-dark-600 hover:bg-dark-500 rounded-xl text-sm text-gray-300 transition">Cancel</button>
+                </div>
+            </form>`;
+        const titleEl = modal.querySelector('[data-sl-prompt-title]');
+        const labelEl = modal.querySelector('[data-sl-prompt-label]');
+        const input = modal.querySelector('[data-sl-prompt-input]');
+        const okEl = modal.querySelector('[data-sl-prompt-ok]');
+        if (title) { titleEl.textContent = title; titleEl.hidden = false; }
+        if (label) { labelEl.textContent = label; labelEl.hidden = false; }
+        okEl.textContent = okLabel;
+        input.value = value;
+        if (placeholder) input.placeholder = placeholder;
+
+        const previousActiveElement = document.activeElement;
+        const focusables = () => Array.from(
+            modal.querySelectorAll('input, button, [tabindex]:not([tabindex="-1"])'),
+        ).filter((el) => !el.disabled && el.offsetParent !== null);
+
+        let settled = false;
+        const close = (result) => {
+            if (settled) return;
+            settled = true;
+            document.removeEventListener('keydown', onKey, true);
+            modal.remove();
+            if (previousActiveElement && typeof previousActiveElement.focus === 'function') {
+                previousActiveElement.focus();
+            }
+            resolve(result);
+        };
+        const onKey = (e) => {
+            if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(null); return; }
+            if (e.key === 'Tab') {
+                const items = focusables();
+                if (!items.length) return;
+                const first = items[0];
+                const last = items[items.length - 1];
+                const active = document.activeElement;
+                if (e.shiftKey && (active === first || !modal.contains(active))) { e.preventDefault(); last.focus(); }
+                else if (!e.shiftKey && (active === last || !modal.contains(active))) { e.preventDefault(); first.focus(); }
+            }
+        };
+        modal.querySelector('form').addEventListener('submit', (e) => { e.preventDefault(); close(input.value); });
+        modal.querySelector('[data-sl-prompt-cancel]').addEventListener('click', () => close(null));
+        modal.addEventListener('mousedown', (e) => { if (e.target === modal) close(null); });
+        document.addEventListener('keydown', onKey, true);
+        document.body.appendChild(modal);
+        input.focus();
+        input.select();
+    });
+}
+
 // ── List View ───────────────────────────────────────────────────────────
 
 async function slLoadList() {
@@ -30,7 +104,7 @@ async function slLoadList() {
 }
 
 async function slCreateNew() {
-    const name = prompt('Setlist name:');
+    const name = await slUiPrompt({ title: 'New Setlist', label: 'Setlist name', okLabel: 'Create' });
     if (!name) return;
     await fetch('/api/plugins/setlist/create', {
         method: 'POST',
@@ -96,7 +170,7 @@ async function slLoadDetail() {
 }
 
 async function slRename() {
-    const name = prompt('New name:');
+    const name = await slUiPrompt({ title: 'Rename Setlist', label: 'New name', okLabel: 'Rename' });
     if (!name) return;
     await fetch(`/api/plugins/setlist/${_slCurrentId}/rename`, {
         method: 'POST',
